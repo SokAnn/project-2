@@ -3,10 +3,10 @@
 module fifo_tb;
 
 parameter DWIDTH             = 8;
-parameter AWIDTH             = 5;
+parameter AWIDTH             = 3;
 parameter SHOWAHEAD          = 1;
-parameter ALMOST_FULL_VALUE  = 27;
-parameter ALMOST_EMPTY_VALUE = 4;
+parameter ALMOST_FULL_VALUE  = 7;
+parameter ALMOST_EMPTY_VALUE = 3;
 parameter REGISTER_OUTPUT    = 0;
 parameter LEN_TEST           = 30;
 
@@ -26,8 +26,8 @@ logic              almost_empty_dut, almost_empty_ref;
 
 logic              empty_flag;
 logic [DWIDTH-1:0] memory     [2**AWIDTH-1:0];
-logic [AWIDTH:0]   temp_rd;
-logic [AWIDTH:0]   temp_wr;
+logic [AWIDTH-1:0] temp_rd;
+logic [AWIDTH-1:0] temp_wr;
 logic              empty;
 logic              full;
 logic              almost_full;
@@ -140,7 +140,7 @@ task generate_data (  );
   
   state = 0;
 
-  while( state < 4 )
+  while( state < 5 )
     begin
       case( state )
         3'd0:
@@ -200,11 +200,30 @@ task generate_data (  );
                 ##1;
               end
           end
+
+        3'd4:
+          begin
+            repeat( 2 ** AWIDTH )
+              begin
+                data_i = $urandom();
+                wrreq_i = 1'b1;
+                rdreq_i = 1'b1;
+                mb_d.put( { data_i, wrreq_i, rdreq_i } );
+                read_dut( mb_dut );
+                read_ref( mb_ref );
+                ##1;
+              end
+            wrreq_i = 1'b0;
+            rdreq_i = 1'b0;
+            mb_d.put( { data_i, wrreq_i, rdreq_i } );
+            read_dut( mb_dut );
+            read_ref( mb_ref );
+            ##1;
+          end
       endcase
       state = state + 1;
     end
 endtask
-
 
 input_data         in_temp;
 output_data        out_temp;
@@ -215,7 +234,6 @@ assign temp_empty_1 = ( usedw === 0 );
 assign empty = ( temp_empty_1 || temp_empty_2 );
 assign almost_empty = ( usedw < ALMOST_EMPTY_VALUE );
 
-
 task write_d ( 
                mailbox #( input_data ) mb_d, 
                mailbox #( output_data ) mb_exp 
@@ -225,7 +243,7 @@ task write_d (
   init_flag <= 1'b1;
   ##1;
   
-  repeat( 2 * 2 ** AWIDTH + 2 * LEN_TEST + 1 )
+  repeat( 3 * 2 ** AWIDTH + 2 * LEN_TEST + 1 )
     begin
       if( init_flag === 1'b1 )
         begin
@@ -257,30 +275,44 @@ task write_d (
               empty_flag <= 1'b0;
 
             if( in_temp[1] === 1'b1 && full === 1'b0 )
-              if( temp_wr != 2 ** AWIDTH - 1 )
-                temp_wr <= temp_wr + 1'(1);
-              else
-                temp_wr <= '0;
-      
-            if( in_temp[1] === 1'b1 && full === 1'b0 )
-              memory[temp_wr] <= in_temp[DWIDTH+1:2];
-      
+              begin
+                if( in_temp[0] === 1'b1 )
+                  begin
+                    if( temp_wr == temp_rd )
+                      begin
+                        if( empty === 1'b1 )
+                          begin
+                            memory[temp_wr] <= in_temp[DWIDTH+1:2];
+                            temp_wr <= temp_wr + 1'(1);
+                          end
+                      end
+                    else
+                      begin
+                        memory[temp_wr] <= in_temp[DWIDTH+1:2];
+                        temp_wr <= temp_wr + 1'(1);
+                      end
+                  end
+                else
+                  begin
+                    memory[temp_wr] <= in_temp[DWIDTH+1:2];
+                    temp_wr <= temp_wr + 1'(1);
+                  end
+              end
+
             if( in_temp[0] === 1'b1 && empty === 1'b0 )
-              if( temp_rd != 2 ** AWIDTH - 1 )
-                temp_rd <= temp_rd + 1'(1);
-              else
-                temp_rd <= '0;
-      
-            if( in_temp[1] === 1'b1 && full === 1'b0 )
-              usedw <= usedw + 1'(1);
-            else 
-              if( in_temp[0] === 1'b1 && empty === 1'b0 )
-                usedw <= usedw - 1'(1);
-      
+              temp_rd <= temp_rd + 1'(1);
+
+            if( !( in_temp[1] && full === 1'b0 ) || !( in_temp[0] && empty === 1'b0 ))
+              begin
+                if( in_temp[1] && full === 1'b0 )
+                  usedw <= usedw + 1'(1);
+                else if( in_temp[0] && empty === 1'b0 )
+                  usedw <= usedw - 1'(1);
+              end
+
             mb_exp.put( out_temp );
           end
      end
-
 endtask
 
 task read_dut ( mailbox #( output_data ) mb_dut );
@@ -375,7 +407,6 @@ task compare_signals_dut_ref ();
     end
 endtask
 
-
 initial
   begin
     srst_i <= 1'b0;
@@ -391,11 +422,7 @@ initial
       compare_signals_dut_ref(  );
     join_any
 
-    fork
-      write_d( mb_d, mb_exp );
-      read_dut( mb_dut );
-      read_ref( mb_ref );
-    join
+    write_d( mb_d, mb_exp );
 
     check_rd_wr( mb_exp, mb_dut, mb_ref );
     $display( "Tests completed with ( %d ) errors.", errors );

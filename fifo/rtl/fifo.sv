@@ -22,8 +22,8 @@ module fifo #(
 );
 
 logic [DWIDTH-1:0] memory       [2**AWIDTH-1:0];
-logic [AWIDTH:0]   temp_rd;
-logic [AWIDTH:0]   temp_wr;
+logic [AWIDTH-1:0] temp_rd;
+logic [AWIDTH-1:0] temp_wr;
 logic              temp_empty1;
 logic              temp_empty2;
 logic [AWIDTH:0]   use_dw       = '0;
@@ -32,7 +32,20 @@ logic              q_flag       = 1'b0;
 always_ff @( posedge clk_i )
   begin
     if( wrreq_i && !full_o )
-      memory[temp_wr] <= data_i;
+      begin
+        if( rdreq_i )
+          begin
+            if( temp_wr == temp_rd )
+              begin
+                if( empty_o )
+                  memory[temp_wr] <= data_i;
+              end
+            else
+              memory[temp_wr] <= data_i;
+          end
+        else
+          memory[temp_wr] <= data_i;
+      end
   end
 
 always_ff @( posedge clk_i )
@@ -51,12 +64,10 @@ always_ff @( posedge clk_i )
     if( srst_i )
       temp_rd <= '0;
     else
-      if( !empty_o )
-        if( rdreq_i )
-          if( temp_rd != ( 2 ** AWIDTH - 1 ) )
-            temp_rd <= temp_rd + 1'(1);
-          else
-            temp_rd <= '0;
+      begin
+        if( rdreq_i && !empty_o )
+          temp_rd <= temp_rd + 1'(1);
+      end
   end
 
 always_ff @( posedge clk_i )
@@ -64,11 +75,23 @@ always_ff @( posedge clk_i )
     if( srst_i )
       temp_wr <= '0;
     else
-      if( wrreq_i && !full_o )
-        if( temp_wr != ( 2 ** AWIDTH - 1 ) )
-          temp_wr <= temp_wr + 1'(1);
-        else
-          temp_wr <= '0;
+      begin
+        if( wrreq_i && !full_o )
+          begin
+            if( rdreq_i )
+              begin
+                if( temp_wr == temp_rd )
+                  begin
+                    if( empty_o )
+                      temp_wr <= temp_wr + 1'(1);
+                  end
+                else
+                  temp_wr <= temp_wr + 1'(1);
+              end
+            else
+              temp_wr <= temp_wr + 1'(1);
+          end
+      end
   end
 
 always_ff @( posedge clk_i )
@@ -77,11 +100,13 @@ always_ff @( posedge clk_i )
       use_dw <= '0;
     else
       begin
-        if( wrreq_i && !full_o )
-          use_dw <= use_dw + 1'(1);
-        else
-          if( rdreq_i && !empty_o )
-            use_dw <= use_dw - 1'(1);
+        if( !( wrreq_i && !full_o ) || !( rdreq_i && !empty_o ))
+          begin
+            if( wrreq_i && !full_o )
+              use_dw <= use_dw + 1'(1);
+            else if( rdreq_i && !empty_o )
+              use_dw <= use_dw - 1'(1);
+          end
       end
   end
 
