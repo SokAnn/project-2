@@ -34,7 +34,7 @@ sort_avalon #(
   .snk_ready_o         ( snk_ready_o )
 );
 
-parameter NUM_TESTS = 100;
+parameter NUM_TESTS = 200;
 
 mailbox #() mb_inp = new();
 mailbox #() mb_out = new();
@@ -99,7 +99,7 @@ task generate_data ();
 endtask
 
 task reading_outputs();
-  repeat( MAX_PKT_LEN + 1 )
+  while( src_eop_o !== 1'b1 )
     begin
       if( src_valid_o === 1'b1 )
         mb_out.put( { 1'b0, 
@@ -109,6 +109,12 @@ task reading_outputs();
                         src_eop_o } );
       ##1;
     end
+  if( src_valid_o === 1'b1 )
+    mb_out.put( { 1'b0, 
+                  src_data_o, 
+                  src_valid_o, 
+                  src_sop_o, 
+                  src_eop_o } );
 endtask
 
 task expected_outputs();
@@ -126,29 +132,17 @@ task expected_outputs();
       memory[count] = temp;
       count = count + 1;
     end
-
-  if( num_w > 1)
-    begin
-      for( int i = 1; i < num_w; i++ )
-        begin
-          j = i - 1;
-          while( j >= 0 && memory[j] > memory[j+1] )
-            begin
-              temp = memory[j];
-              memory[j] = memory[j+1];
-              memory[j+1] = temp;
-              j--;
-            end
-        end
-    end
-   
+  
+  memory.sort();
+  //##1;
   for( int i = 0; i < num_w; i++ )
     begin
-      mb_exp.put( { memory[i], 
+      mb_exp.put( { memory[num_w - 1 - i], 
                     1'b1, 
                     ( i == 0 ), 
                     ( i == num_w - 1 ) } );
     end
+  
   for( int i = 0; i < MAX_PKT_LEN; i++ )
     memory[i] = 'x;
 endtask

@@ -21,42 +21,85 @@ module sort_avalon #(
 );
 
 logic [DWIDTH-1:0] memory [MAX_PKT_LEN-1:0];
-logic [$clog2(MAX_PKT_LEN):0] temp_w, temp_r;
-logic sort_flag, out_trans;
+logic [DWIDTH-1:0] sorted_array [MAX_PKT_LEN-1:0];
+
+logic [$clog2(MAX_PKT_LEN):0] written_words, read_words;
+logic                         out_trans;
+logic [$clog2(MAX_PKT_LEN):0] sorted_word;
+logic [DWIDTH-1:0]            word;
+
+typedef enum logic [1:0] {INPUT_TRANS_S, SORT_S, OUTPUT_TRANS_S} state_type;
+state_type state, next_state;
+
 
 always_ff @( posedge clk_i )
   begin
     if( srst_i )
-      temp_w <= '0;
+      state <= INPUT_TRANS_S;
+    else
+      state <= next_state;
+  end
+
+always_comb
+  begin
+    next_state = state;
+    case( state )
+      INPUT_TRANS_S:
+        begin
+          if( snk_valid_i && snk_endofpacket_i )
+            next_state = SORT_S;
+        end
+        
+      SORT_S:
+        begin
+          if( out_trans )
+            next_state = OUTPUT_TRANS_S;
+        end
+        
+      OUTPUT_TRANS_S:
+        begin
+          if( src_endofpacket_o )
+            next_state = INPUT_TRANS_S;
+        end
+        
+      default: next_state = INPUT_TRANS_S;
+    endcase
+  end
+
+always_ff @( posedge clk_i )
+  begin
+    if( srst_i )
+      written_words <= '0;
     else
       begin
-        if( snk_ready_o )
+        if( state == INPUT_TRANS_S )
           if( snk_valid_i )
-            temp_w <= temp_w + 1'(1);
-        if( src_endofpacket_o )
-          temp_w <= '0;
+            written_words <= written_words + 1'(1);
+        if( state == OUTPUT_TRANS_S )
+          if( src_endofpacket_o )
+            written_words <= '0;
       end
   end
 
 always_ff @( posedge clk_i )
   begin
-    if( snk_ready_o ) 
+    if( state == INPUT_TRANS_S )
       if( snk_valid_i )
-        memory[temp_w] <= snk_data_i;
+        memory[written_words] <= snk_data_i;
   end
 
 always_ff @( posedge clk_i )
   begin
     if( srst_i )
-      temp_r <= '0;
+      read_words <= '0;
     else
       begin
-        if( out_trans )
+        if( next_state == OUTPUT_TRANS_S || state == OUTPUT_TRANS_S )
           begin
-            if( temp_r <= temp_w && !src_endofpacket_o )
-              temp_r <= temp_r + 1'(1);
+            if( read_words <= written_words && !src_endofpacket_o )
+              read_words <= read_words + 1'(1);
             else
-              temp_r <= '0;
+              read_words <= '0;
           end
       end
   end
@@ -67,10 +110,10 @@ always_ff @( posedge clk_i )
       src_data_o <= 'x;
     else
       begin
-        if( out_trans )
+        if( next_state == OUTPUT_TRANS_S || state == OUTPUT_TRANS_S )
           begin
-            if( temp_r < temp_w )
-              src_data_o <= memory[temp_r];
+            if( read_words < written_words )
+              src_data_o <= sorted_array[read_words];
           end
       end
   end
@@ -81,9 +124,9 @@ always_ff @( posedge clk_i )
       src_valid_o <= 1'b0;
     else
       begin
-        if( out_trans )
+        if( next_state == OUTPUT_TRANS_S || state == OUTPUT_TRANS_S )
           begin
-            if( temp_r <= temp_w && !src_endofpacket_o )
+            if( read_words <= written_words && !src_endofpacket_o )
               src_valid_o <= 1'b1;
             else
               src_valid_o <= 1'b0;
@@ -91,8 +134,8 @@ always_ff @( posedge clk_i )
       end
   end
 
-assign src_startofpacket_o = ( src_valid_o && temp_r == 1 );
-assign src_endofpacket_o   = ( src_valid_o && temp_r == temp_w && temp_w != 0 );
+assign src_startofpacket_o = ( src_valid_o && read_words == 1 );
+assign src_endofpacket_o   = ( src_valid_o && read_words == written_words && written_words != 0 );
 
 always_ff @( posedge clk_i )
   begin
@@ -100,29 +143,26 @@ always_ff @( posedge clk_i )
       snk_ready_o <= 1'b0;
     else
       begin
-        if( snk_endofpacket_i )
-          snk_ready_o <= 1'b0;
+        if( next_state == INPUT_TRANS_S )
+          snk_ready_o <= 1'b1;
         else
-          begin
-            if( sort_flag || out_trans )
-              snk_ready_o <= 1'b0;
-            else
-              snk_ready_o <= 1'b1;
-          end
+          snk_ready_o <= 1'b0;
       end
   end
 
 always_ff @( posedge clk_i )
   begin
-    if( srst_i )
-      sort_flag <= 1'b0;
+    if( snk_endofpacket_i )
+      sorted_word <= '0;
     else
-      begin
-        if( snk_endofpacket_i )
-          sort_flag <= 1'b1;
-        else
-          sort_flag <= 1'b0;
-      end
+      if( state == SORT_S )
+        sorted_word <= sorted_word + 1'(1);
+  end
+
+always_ff @( posedge clk_i )
+  begin
+    if( next_state == SORT_S || state == SORT_S )
+      word <= memory[sorted_word];
   end
 
 always_ff @( posedge clk_i )
@@ -131,33 +171,45 @@ always_ff @( posedge clk_i )
       out_trans <= 1'b0;
     else
       begin
-        if( sort_flag )
-          out_trans <= my_insert_sort();
-        else   
-          if( temp_r == temp_w )
-            out_trans <= 1'b0;
+        if( state == SORT_S )
+          out_trans <= my_insert_sort( sorted_word, written_words, word, sorted_array );
+        else 
+          out_trans <= 1'b0;  
       end
   end
 
-function logic my_insert_sort();
+function automatic logic my_insert_sort( logic [$clog2(MAX_PKT_LEN):0] sorted_word,
+                                         logic [$clog2(MAX_PKT_LEN):0] written_words,
+                                         logic [DWIDTH-1:0] word,
+                                         ref logic [DWIDTH-1:0] array [MAX_PKT_LEN-1:0] );
   int j;
   logic [DWIDTH-1:0] temp;
   
-  if( temp_w > 1)
+  if( sorted_word == 0 )
+    for(int i = 0; i < MAX_PKT_LEN; i++)
+      array[i] = 'x;
+  
+  if( sorted_word <= written_words )
+    array[sorted_word-1] = word;
+
+  if( sorted_word > written_words )
+    return 1'b1;
+  else
     begin
-      for( int i = 1; i < temp_w; i++ )
+      if( sorted_word-1 > 0 && sorted_word <= written_words )
         begin
-          j = i - 1;
-          while( j >= 0 && memory[j] > memory[j+1] )
+          for(int j = MAX_PKT_LEN-2; j >= 0; j--)
             begin
-              temp = memory[j];
-              memory[j] = memory[j+1];
-              memory[j+1] = temp;
-              j--;
+              if( array[j] > array[j+1] )
+                begin
+                  temp = array[j];
+                  array[j] = array[j+1];
+                  array[j+1] = temp;
+                end
             end
         end
+      return 1'b0;
     end
-  return 1'b1;
 endfunction
 
 endmodule
