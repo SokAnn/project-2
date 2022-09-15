@@ -1,6 +1,6 @@
 module sort_avalon #(
-  parameter DWIDTH      = 4,
-  parameter MAX_PKT_LEN = 5
+  parameter DWIDTH      = 6,
+  parameter MAX_PKT_LEN = 10
 )(
   input logic               clk_i,
   input logic               srst_i,
@@ -21,18 +21,25 @@ module sort_avalon #(
 );
 
 logic [DWIDTH-1:0] memory [MAX_PKT_LEN-1:0];
-logic [MAX_PKT_LEN-1:0][DWIDTH-1:0] sorted_array;
 
-logic [$clog2(MAX_PKT_LEN):0] written_words, read_word;
-logic                         out_trans;
-logic [$clog2(MAX_PKT_LEN):0] sorted_word;
-logic [DWIDTH-1:0]            word;
-logic                         sorted_flag;
+logic [$clog2(MAX_PKT_LEN):0] written_words, read_sort_word;
+logic [$clog2(MAX_PKT_LEN):0] sorted_word,   read_words;
+logic [DWIDTH-1:0]            word,          temp_word;
+logic                         flag;
 
-typedef enum logic [1:0] {INPUT_TRANS_S, READ_FROM_MEM_S, SORTING_DATA_S, OUTPUT_TRANS_S} state_type;
+logic we_a, we_b;
+logic re_a, re_b;
+
+typedef enum logic [2:0] {INPUT_TRANS_S, READ_FROM_MEM_S, SORTING_DATA_S, WRITE_TO_MEM_S, OUTPUT_TRANS_S} state_type;
 state_type state, next_state;
 
+assign we_a = ( ( state == INPUT_TRANS_S ) && snk_valid_i );
+assign re_a = ( ( next_state == OUTPUT_TRANS_S ) || ( state == OUTPUT_TRANS_S ) );
 
+assign we_b = ( state == WRITE_TO_MEM_S );
+assign re_b = ( state == READ_FROM_MEM_S );
+
+// state-next_state logic
 always_ff @( posedge clk_i )
   begin
     if( srst_i )
@@ -41,6 +48,7 @@ always_ff @( posedge clk_i )
       state <= next_state;
   end
 
+// next_state logic
 always_comb
   begin
     next_state = state;
@@ -48,23 +56,31 @@ always_comb
       INPUT_TRANS_S:
         begin
           if( snk_valid_i && snk_endofpacket_i )
-            next_state = READ_FROM_MEM_S;;
-        end
-        
-      READ_FROM_MEM_S:
-        begin
-          next_state = SORTING_DATA_S;
+            next_state = SORTING_DATA_S;
         end
       
       SORTING_DATA_S:
         begin
-          if( read_word == written_words - 1 && sorted_flag )
+          if( read_sort_word == ( written_words - 1 ) && read_sort_word == sorted_word || ( read_sort_word == ( written_words ) ) )
             next_state = OUTPUT_TRANS_S;
           else
-           if( sorted_flag || read_word == 0 )
-             next_state = READ_FROM_MEM_S;
+            if( memory[read_sort_word] < memory[sorted_word] )
+              next_state = READ_FROM_MEM_S;
         end
-        
+      
+      READ_FROM_MEM_S:
+        begin
+          next_state = WRITE_TO_MEM_S;
+        end
+      
+      WRITE_TO_MEM_S:
+        begin
+          if( read_sort_word == sorted_word )
+            next_state = SORTING_DATA_S;
+          else
+            next_state = READ_FROM_MEM_S;
+        end
+       
       OUTPUT_TRANS_S:
         begin
           if( src_endofpacket_o )
@@ -75,6 +91,7 @@ always_comb
     endcase
   end
 
+// written_words
 always_ff @( posedge clk_i )
   begin
     if( srst_i )
@@ -84,117 +101,136 @@ always_ff @( posedge clk_i )
         if( state == INPUT_TRANS_S )
           if( snk_valid_i )
             written_words <= written_words + 1'(1);
+        
         if( state == OUTPUT_TRANS_S )
           if( src_endofpacket_o )
             written_words <= '0;
       end
   end
 
+// read_words
 always_ff @( posedge clk_i )
   begin
-    if( state == INPUT_TRANS_S )
-      if( snk_valid_i )
-        memory[written_words] <= snk_data_i;
+    if( srst_i )
+      read_words <= '0;
+    else
+      begin
+        if( re_a )
+          if( read_words < written_words )
+            read_words <= read_words + 1'(1);
+        else
+          read_words <= '0;
+      end
+  end
+
+// block a
+always_ff @( posedge clk_i )
+  begin
+    if( we_a )
+      memory[written_words] <= snk_data_i;
+    else
+      if( re_a )
+        src_data_o <= memory[read_words];
   end
 
 always_ff @( posedge clk_i )
   begin
     if( srst_i )
-      read_word <= '0;
+      flag <= 1'b0;
     else
       begin
-        if( state == INPUT_TRANS_S && next_state == READ_FROM_MEM_S )
-          read_word <= '0;
-        else
-          if( next_state == READ_FROM_MEM_S )
-            read_word <= read_word + 1'(1);
-
-        if( state == SORTING_DATA_S && next_state == OUTPUT_TRANS_S )
-          read_word <= 1'd1;
-        else
-          if( state == OUTPUT_TRANS_S )
-           read_word <= read_word + 1'(1);
+        if( we_b )
+          flag <= 1'b1;
+        
+        if( next_state == SORTING_DATA_S )
+          flag <= 1'b0;
       end
+  end
+
+// block b
+always_ff @( posedge clk_i )
+  begin
+    if( we_b )begin
+      if( flag )
+        memory[sorted_word] <= temp_word;
+      else
+        memory[sorted_word] <= memory[read_sort_word];end
+    else
+      if( re_b )
+        if( sorted_word != read_sort_word )
+          word <= memory[sorted_word];
   end
 
 always_ff @( posedge clk_i )
   begin
-    if( state == READ_FROM_MEM_S )
-      word <= memory[read_word];
+    temp_word <= word;
+  end
+
+// read_sort_word
+always_ff @( posedge clk_i )
+  begin
+    if( srst_i )
+      read_sort_word <= '0;
     else
       begin
-        if( state == SORTING_DATA_S && written_words > 1 )
-          if( word < sorted_array[sorted_word] )
-            word <= sorted_array[sorted_word];
+        if( state == INPUT_TRANS_S )
+          read_sort_word <= '0;
+        
+        if( state == SORTING_DATA_S )
+          begin
+            if( read_sort_word < written_words )begin
+              if( read_sort_word == sorted_word )
+                read_sort_word <= read_sort_word + 1'(1);end
+            else
+              read_sort_word <= '0;
+          end
+        
+        if( we_b && next_state == SORTING_DATA_S )
+          begin
+            if( read_sort_word < written_words )
+              read_sort_word <= read_sort_word + 1'(1);
+            else
+              read_sort_word <= '0;
+          end
       end
   end
 
+// sorted_word
 always_ff @( posedge clk_i )
   begin
     if( srst_i )
       sorted_word <= '0;
     else
       begin
-        if( state == READ_FROM_MEM_S && next_state == SORTING_DATA_S )
-          sorted_word <= '0;
-        else
-          if( state == SORTING_DATA_S )
-            sorted_word <= sorted_word + 1'(1);
-      end
-  end
-
-assign sorted_flag = ( state == SORTING_DATA_S ) ? ( sorted_word == read_word ) : ( 1'b0 ) ;
-
-always_ff @( posedge clk_i )
-  begin
-    if( srst_i )
-      sorted_array <= 'x;
-    else
-      begin
         if( state == INPUT_TRANS_S )
-          sorted_array <= 'x;
-        else
+          sorted_word <= '0;
+
+        if( state == SORTING_DATA_S && next_state == SORTING_DATA_S )
           begin
-            if( state == SORTING_DATA_S && written_words > 1 )
-              begin
-                if( read_word == 0 )
-                  sorted_array[sorted_word] <= word;
-                else
-                  begin
-                    if( word < sorted_array[sorted_word] )
-                      sorted_array[sorted_word] <= word;
-                    else
-                      if( read_word == sorted_word )
-                        sorted_array[sorted_word] <= word;
-                  end
-              end
+            if( sorted_word != read_sort_word )
+              sorted_word <= sorted_word + 1'(1);
+            else
+              sorted_word <= '0;
           end
-      end
-  end
-
-always_ff @( posedge clk_i )
-  begin
-    if( state == SORTING_DATA_S && next_state == OUTPUT_TRANS_S )
-      begin
-        if( written_words > 1)
-          src_data_o <= sorted_array[written_words-read_word-1];
         else
-          src_data_o <= word;
+          if( state == WRITE_TO_MEM_S )
+            if( next_state != SORTING_DATA_S )
+              sorted_word <= sorted_word + 1'(1);
+            else
+              sorted_word <= '0;
       end
-    else
-      if( state == OUTPUT_TRANS_S )
-        src_data_o <= sorted_array[read_word];
   end
 
+// src_valid_o
 always_ff @( posedge clk_i )
   begin
     if( srst_i )
       src_valid_o <= 1'b0;
     else
       begin
-        if( next_state == OUTPUT_TRANS_S || state == OUTPUT_TRANS_S )
+        if( ( next_state == OUTPUT_TRANS_S ) || ( state == OUTPUT_TRANS_S ) )
           begin
-            if( read_word <= written_words && !src_endofpacket_o )
+            if( !src_endofpacket_o )
               src_valid_o <= 1'b1;
             else
               src_valid_o <= 1'b0;
@@ -202,9 +238,10 @@ always_ff @( posedge clk_i )
       end
   end
 
-assign src_startofpacket_o = ( src_valid_o && read_word == 1 );
-assign src_endofpacket_o   = ( src_valid_o && read_word == written_words && written_words != 0 );
+assign src_startofpacket_o = ( src_valid_o && ( read_words == 1 ) );
+assign src_endofpacket_o   = ( src_valid_o && ( read_words == written_words ) && ( written_words != 0 ) );
 
+// snk_ready_o
 always_ff @( posedge clk_i )
   begin
     if( srst_i )
@@ -219,4 +256,3 @@ always_ff @( posedge clk_i )
   end
 
 endmodule
-
